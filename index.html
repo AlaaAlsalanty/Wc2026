@@ -274,6 +274,16 @@ select:focus{outline:none;border-color:var(--gold);}
         <p style="font-size:12px;color:var(--muted);margin-bottom:10px">أدخل ترتيب المجموعات بعد انتهاء دور المجموعات لتحديث أسماء دور الـ32</p>
         <button onclick="openGroupsModal()" style="width:100%;padding:11px;background:rgba(52,152,219,0.15);border:1px solid rgba(52,152,219,0.3);border-radius:10px;color:#7eb9e0;font-family:'Cairo',sans-serif;font-weight:700;cursor:pointer;font-size:14px;min-height:44px;touch-action:manipulation">تعديل ترتيب المجموعات 📝</button>
         <div id="groups-summary" style="margin-top:10px"></div>
+
+        <!-- تأهل الفرق الثالثة -->
+        <div class="pre-section" style="margin-top:14px">
+          <h3 style="font-size:14px">🥉 تأهل الفرق الثالثة (8 من 12)</h3>
+          <p style="font-size:12px;color:var(--muted);margin-bottom:10px">اختار المجموعات اللي فريقها الثالث تأهل لدور الـ32 (لازم تختار 8 بالظبط)</p>
+          <div id="third-qualifiers-grid" style="display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-bottom:10px"></div>
+          <div id="third-qualifiers-count" style="font-size:12px;color:var(--muted);text-align:center;margin-bottom:8px"></div>
+          <button onclick="saveThirdQualifiers()" style="width:100%;padding:11px;background:rgba(245,166,35,0.15);border:1px solid var(--gold);border-radius:10px;color:var(--gold);font-family:'Cairo',sans-serif;font-weight:700;cursor:pointer;font-size:14px;min-height:44px;touch-action:manipulation">حفظ الفرق الثالثة المتأهلة ✓</button>
+          <div id="third-qualifiers-result" style="margin-top:10px"></div>
+        </div>
       </div>
 
       <!-- بونص الجولات -->
@@ -581,8 +591,8 @@ function cairoClock(){
 function resolveTeam(code){
   if(!code) return '';
   const standings=dbCache.standings||{};
-  // codes like "1A", "2B", "3ABCDF"
-  const m1=code.match(/^([123])([A-L])$/);
+  // codes like "1A", "2B"
+  const m1=code.match(/^([12])([A-L])$/);
   if(m1){
     const rank=parseInt(m1[1])-1;
     const grp=m1[2];
@@ -590,12 +600,58 @@ function resolveTeam(code){
     if(arr&&arr[rank]) return arr[rank];
     return code+' (لم يُحدد)';
   }
-  const m2=code.match(/^([123])([A-L]+)$/);
+  // codes like "3ABCDF" - third place qualifier slots
+  const m2=code.match(/^3([A-L]+)$/);
   if(m2){
-    return 'ثالث مجموعات '+m2[2]+' ('+code+')';
+    const assignment=getThirdPlaceAssignment();
+    const grp=assignment[code];
+    if(grp && standings[grp] && standings[grp][2]) return standings[grp][2];
+    return 'ثالث '+m2[1].split('').join('/')+' (لم يُحدد)';
   }
   // codes like "فائز م73"
   return code;
+}
+
+// خوارزمية توزيع الفرق الثالثة المتأهلة على أماكنها في دور الـ32
+// كل slot عنده قايمة مجموعات محتملة، والمطلوب نوزع الـ8 مجموعات المتأهلة
+// على الـ8 الأماكن بحيث كل مكان ياخد مجموعة من قايمته، وكل مجموعة تروح لمكان واحد فقط
+function getThirdPlaceAssignment(){
+  const qualifiers=dbCache.settings?.third_qualifiers;
+  if(!qualifiers||qualifiers.length!==8) return {};
+  // cache the result so we don't recompute every render
+  if(dbCache._thirdAssignCache && dbCache._thirdAssignCacheKey===qualifiers.join(',')) {
+    return dbCache._thirdAssignCache;
+  }
+  const slots=[
+    {code:'3ABCDF',groups:['A','B','C','D','F']},
+    {code:'3CDFGH',groups:['C','D','F','G','H']},
+    {code:'3CEFHI',groups:['C','E','F','H','I']},
+    {code:'3EHIJK',groups:['E','H','I','J','K']},
+    {code:'3AEHIJ',groups:['A','E','H','I','J']},
+    {code:'3BEFIJ',groups:['B','E','F','I','J']},
+    {code:'3EFGIJ',groups:['E','F','G','I','J']},
+    {code:'3DEIJL',groups:['D','E','I','J','L']},
+  ];
+  const assignment={};
+  const usedGroups=new Set();
+  // Backtracking bipartite matching
+  function backtrack(idx){
+    if(idx===slots.length) return true;
+    const slot=slots[idx];
+    const candidates=slot.groups.filter(g=>qualifiers.includes(g)&&!usedGroups.has(g));
+    for(const g of candidates){
+      usedGroups.add(g);
+      assignment[slot.code]=g;
+      if(backtrack(idx+1)) return true;
+      usedGroups.delete(g);
+      delete assignment[slot.code];
+    }
+    return false;
+  }
+  backtrack(0);
+  dbCache._thirdAssignCache=assignment;
+  dbCache._thirdAssignCacheKey=qualifiers.join(',');
+  return assignment;
 }
 
 function getRounds(){
@@ -1211,6 +1267,7 @@ function renderJudgeMain(){
   renderJudgeMatches();
   renderJudgeLocks();
   renderGroupsSummary();
+  renderThirdQualifiersUI();
   renderBonusSettings();
   renderJudgePreSection();
   renderJudgeScoreTable();
@@ -1328,6 +1385,99 @@ function renderGroupsSummary(){
   });
   h+='</div>';
   document.getElementById('groups-summary').innerHTML=h;
+}
+
+// ============ THIRD PLACE QUALIFIERS ============
+function renderThirdQualifiersUI(){
+  const saved=dbCache.settings?.third_qualifiers||[];
+  const grpKeys=Object.keys(GROUPS);
+  const grid=document.getElementById('third-qualifiers-grid');
+  if(!grid) return;
+  grid.innerHTML=grpKeys.map(g=>{
+    const isOn=saved.includes(g);
+    return `<button onclick="toggleThirdQualifier('${g}')" data-grp="${g}"
+      style="padding:10px 6px;border-radius:8px;font-family:'Cairo',sans-serif;font-size:13px;font-weight:700;cursor:pointer;border:1.5px solid ${isOn?'var(--gold)':'var(--border)'};background:${isOn?'rgba(245,166,35,0.15)':'var(--card2)'};color:${isOn?'var(--gold)':'var(--muted)'};min-height:40px;touch-action:manipulation">
+      ${g}
+    </button>`;
+  }).join('');
+  updateThirdQualifiersCount();
+  renderThirdAssignmentResult();
+}
+
+let thirdQualifiersTemp=null; // local selection before saving
+
+function toggleThirdQualifier(g){
+  if(thirdQualifiersTemp===null){
+    thirdQualifiersTemp=[...(dbCache.settings?.third_qualifiers||[])];
+  }
+  const idx=thirdQualifiersTemp.indexOf(g);
+  if(idx>=0) thirdQualifiersTemp.splice(idx,1);
+  else {
+    if(thirdQualifiersTemp.length>=8){toast('اختارت 8 بالفعل! شيل واحد الأول','var(--red)');return;}
+    thirdQualifiersTemp.push(g);
+  }
+  // re-render buttons with temp state
+  const grpKeys=Object.keys(GROUPS);
+  const grid=document.getElementById('third-qualifiers-grid');
+  grid.innerHTML=grpKeys.map(gg=>{
+    const isOn=thirdQualifiersTemp.includes(gg);
+    return `<button onclick="toggleThirdQualifier('${gg}')" data-grp="${gg}"
+      style="padding:10px 6px;border-radius:8px;font-family:'Cairo',sans-serif;font-size:13px;font-weight:700;cursor:pointer;border:1.5px solid ${isOn?'var(--gold)':'var(--border)'};background:${isOn?'rgba(245,166,35,0.15)':'var(--card2)'};color:${isOn?'var(--gold)':'var(--muted)'};min-height:40px;touch-action:manipulation">
+      ${gg}
+    </button>`;
+  }).join('');
+  updateThirdQualifiersCountTemp();
+}
+
+function updateThirdQualifiersCount(){
+  const saved=dbCache.settings?.third_qualifiers||[];
+  const el=document.getElementById('third-qualifiers-count');
+  if(el) el.textContent=`تم اختيار ${saved.length} من 8`;
+}
+function updateThirdQualifiersCountTemp(){
+  const el=document.getElementById('third-qualifiers-count');
+  if(el){
+    const n=thirdQualifiersTemp.length;
+    el.textContent=`تم اختيار ${n} من 8`+(n===8?' ✓':'');
+    el.style.color=n===8?'var(--green)':'var(--muted)';
+  }
+}
+
+async function saveThirdQualifiers(){
+  const selected=thirdQualifiersTemp!==null?thirdQualifiersTemp:(dbCache.settings?.third_qualifiers||[]);
+  if(selected.length!==8){toast('لازم تختار 8 مجموعات بالظبط','var(--red)');return;}
+  await fbSet('settings/third_qualifiers',selected);
+  thirdQualifiersTemp=null;
+  toast('✓ تم حفظ الفرق الثالثة المتأهلة');
+  renderThirdQualifiersUI();
+}
+
+function renderThirdAssignmentResult(){
+  const el=document.getElementById('third-qualifiers-result');
+  if(!el) return;
+  const qualifiers=dbCache.settings?.third_qualifiers;
+  if(!qualifiers||qualifiers.length!==8){el.innerHTML='';return;}
+  const assignment=getThirdPlaceAssignment();
+  const standings=dbCache.standings||{};
+  const slotNames={
+    '3ABCDF':'م75 (مع 1E)','3CDFGH':'م78 (مع 1I)','3CEFHI':'م79 (مع 1A)',
+    '3EHIJK':'م80 (مع 1L)','3AEHIJ':'م82 (مع 1G)','3BEFIJ':'م81 (مع 1D)',
+    '3EFGIJ':'م85 (مع 1B)','3DEIJL':'م88 (مع 1K)'
+  };
+  if(Object.keys(assignment).length<8){
+    el.innerHTML='<div class="warn">⚠️ مفيش توزيع صحيح ممكن بالمجموعات دي - جرب تشكيلة مختلفة</div>';
+    return;
+  }
+  let h='<div style="font-size:12px;color:var(--muted);margin-bottom:6px">التوزيع التلقائي:</div><div style="display:grid;gap:5px">';
+  Object.entries(assignment).forEach(([code,grp])=>{
+    const team=standings[grp]?.[2]||'(ثالث '+grp+' غير محدد)';
+    h+=`<div style="background:var(--card2);border-radius:6px;padding:6px 10px;font-size:12px;display:flex;justify-content:space-between">
+      <span style="color:var(--gold);font-weight:700">${team}</span>
+      <span style="color:var(--muted)">${slotNames[code]||code}</span>
+    </div>`;
+  });
+  h+='</div>';
+  el.innerHTML=h;
 }
 
 function renderJudgeLocks(){
