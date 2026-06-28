@@ -603,37 +603,12 @@ function cairoClock(){
 }
 
 // resolve match home/away using group standings
-function resolveTeam(code){
-  if(!code) return '';
-  const standings=dbCache.standings||{};
-  // codes like "1A", "2B"
-  const m1=code.match(/^([12])([A-L])$/);
-  if(m1){
-    const rank=parseInt(m1[1])-1;
-    const grp=m1[2];
-    const arr=standings[grp];
-    if(arr&&arr[rank]) return arr[rank];
-    return code+' (لم يُحدد)';
-  }
-  // codes like "3ABCDF" - third place qualifier slots
-  const m2=code.match(/^3([A-L]+)$/);
-  if(m2){
-    const assignment=getThirdPlaceAssignment();
-    const grp=assignment[code];
-    if(grp && standings[grp] && standings[grp][2]) return standings[grp][2];
-    return 'ثالث '+m2[1].split('').join('/')+' (لم يُحدد)';
-  }
-  // codes like "فائز م73"
-  return code;
-}
-
 // خوارزمية توزيع الفرق الثالثة المتأهلة على أماكنها في دور الـ32
 // كل slot عنده قايمة مجموعات محتملة، والمطلوب نوزع الـ8 مجموعات المتأهلة
 // على الـ8 الأماكن بحيث كل مكان ياخد مجموعة من قايمته، وكل مجموعة تروح لمكان واحد فقط
 function getThirdPlaceAssignment(){
   const qualifiers=dbCache.settings?.third_qualifiers;
   if(!qualifiers||qualifiers.length!==8) return {};
-  // cache the result so we don't recompute every render
   if(dbCache._thirdAssignCache && dbCache._thirdAssignCacheKey===qualifiers.join(',')) {
     return dbCache._thirdAssignCache;
   }
@@ -649,7 +624,6 @@ function getThirdPlaceAssignment(){
   ];
   const assignment={};
   const usedGroups=new Set();
-  // Backtracking bipartite matching
   function backtrack(idx){
     if(idx===slots.length) return true;
     const slot=slots[idx];
@@ -669,24 +643,96 @@ function getThirdPlaceAssignment(){
   return assignment;
 }
 
-function getRounds(){
+// يحدد الفريق الفائز في ماتش معين (بناءً على النتيجة، وضربات الجزاء لو تعادل)
+// يرجع 'home' أو 'away' أو null لو مش معروف لسه
+function getMatchWinnerSide(mid){
+  const result=(dbCache.results||{})[mid];
+  if(!result||result.home===''||result.away==='') return null;
+  const hg=parseInt(result.home), ag=parseInt(result.away);
+  if(isNaN(hg)||isNaN(ag)) return null;
+  if(hg>ag) return 'home';
+  if(ag>hg) return 'away';
+  // تعادل - لازم ضربات جزاء
+  if(result.pen==='home'||result.pen==='away') return result.pen;
+  return null; // تعادل بدون نتيجة جزاء لسه
+}
+
+// يبني خريطة الفرق الفعلية لكل ماتشات أدوار خروج المغلوب (دور 32 وما بعده)
+// بيحل الرموز زي "1A" و"3ABCDF" و"فائز م73" و"خاسر نصف 1" بالترتيب الصحيح دور بدور
+function buildKnockoutResolution(){
+  const cacheKey = JSON.stringify({
+    standings: dbCache.standings, qualifiers: dbCache.settings?.third_qualifiers,
+    overrides: dbCache.manual_overrides, results: dbCache.results
+  });
+  if(dbCache._koCache && dbCache._koCacheKey===cacheKey) return dbCache._koCache;
+
+  const standings=dbCache.standings||{};
+  const thirdAssignment=getThirdPlaceAssignment();
   const overrides=dbCache.manual_overrides||{};
+  const winnersMap={}, losersMap={}, resolvedTeams={};
+
+  function resolveCode(code){
+    if(!code) return '';
+    let m=code.match(/^([12])([A-L])$/);
+    if(m){
+      const rank=parseInt(m[1])-1, grp=m[2];
+      return (standings[grp]&&standings[grp][rank]) || (code+' (لم يُحدد)');
+    }
+    m=code.match(/^3([A-L]+)$/);
+    if(m){
+      const grp=thirdAssignment[code];
+      return (grp&&standings[grp]&&standings[grp][2]) || ('ثالث '+m[1].split('').join('/')+' (لم يُحدد)');
+    }
+    m=code.match(/^فائز م(\d+)$/);
+    if(m) return winnersMap['m'+m[1]] || (code+' (لم يُحدد)');
+    m=code.match(/^خاسر م(\d+)$/);
+    if(m) return losersMap['m'+m[1]] || (code+' (لم يُحدد)');
+    if(code==='فائز نصف 1') return winnersMap['m101'] || (code+' (لم يُحدد)');
+    if(code==='فائز نصف 2') return winnersMap['m102'] || (code+' (لم يُحدد)');
+    if(code==='خاسر نصف 1') return losersMap['m101'] || (code+' (لم يُحدد)');
+    if(code==='خاسر نصف 2') return losersMap['m102'] || (code+' (لم يُحدد)');
+    return code;
+  }
+
+  const koRounds=ROUNDS_BASE.filter(r=>['r32','r16','qf','sf','fin'].includes(r.id));
+  koRounds.forEach(round=>{
+    round.matches.forEach(m=>{
+      const ov=overrides[m.id]||{};
+      const home=ov.home || resolveCode(m._home);
+      const away=ov.away || resolveCode(m._away);
+      resolvedTeams[m.id]={home,away};
+      const side=getMatchWinnerSide(m.id);
+      if(side){
+        winnersMap[m.id]= side==='home' ? home : away;
+        losersMap[m.id] = side==='home' ? away : home;
+      }
+    });
+  });
+
+  const out={resolvedTeams,winnersMap,losersMap};
+  dbCache._koCache=out;
+  dbCache._koCacheKey=cacheKey;
+  return out;
+}
+
+function getRounds(){
+  const {resolvedTeams}=buildKnockoutResolution();
   return ROUNDS_BASE.map(r=>({
     ...r,
     matches: r.matches.map(m=>{
-      const ov=overrides[m.id];
       if(m._home!==undefined){
-        return {
-          ...m,
-          home: (ov&&ov.home) ? ov.home : resolveTeam(m._home),
-          away: (ov&&ov.away) ? ov.away : resolveTeam(m._away)
-        };
+        const rt=resolvedTeams[m.id]||{};
+        return {...m, home: rt.home||m._home, away: rt.away||m._away};
       }
-      // even non-bracket matches (group stage) could theoretically be overridden, but not needed
       return m;
     })
   }));
 }
+
+// هل الجولة دي من أدوار خروج المغلوب (محتاجة ضربات جزاء عند التعادل)؟
+const KNOCKOUT_ROUNDS=['r32','r16','qf','sf','fin'];
+function isKnockoutRound(rid){ return KNOCKOUT_ROUNDS.includes(rid); }
+
 
 function isLocked(rid){return (dbCache.locks||{})[rid]===true;}
 function isPreLocked(){
@@ -731,6 +777,7 @@ function isPreLockedAuto(){
   return now>=(g1.deadline-10*60*1000);
 }
 
+// نقاط التوقع الرقمي/الصحيح (الموجودة من الأول): 2 لو التوقع مظبوط بالظبط، 1 لو النتيجة صح (فوز/تعادل/خسارة) بس مش بالظبط
 function calcPts(pred,result,isCap){
   if(!result||pred.home===''||pred.away==='') return null;
   const rH=parseInt(result.home),rA=parseInt(result.away);
@@ -742,23 +789,75 @@ function calcPts(pred,result,isCap){
   return isCap?pts*2:pts;
 }
 
+// نقاط الأجوال: نقطة لكل جول صح (Math.min بين المتوقع والحقيقي لكل فريق) - بتنطبق على كل الماتشات
+function calcGoalPoints(pred,result,isCap){
+  if(!result||pred.home===''||pred.away==='') return 0;
+  const rH=parseInt(result.home),rA=parseInt(result.away);
+  const pH=parseInt(pred.home),pA=parseInt(pred.away);
+  if([rH,rA,pH,pA].some(isNaN)) return 0;
+  let pts=Math.min(pH,rH)+Math.min(pA,rA);
+  return isCap?pts*2:pts;
+}
+
+// مكونات نقط ضربات الجزاء (لأدوار خروج المغلوب فقط):
+// occurred = 1 لو اللاعب توقع تعادل والماتش فعلاً احتاج جزاء (بغض النظر عن اختياره للفايز)
+// winner = 1 إضافية لو اختار الفريق اللي فاز بالجزاء صح
+function calcPenaltyComponents(pred,result){
+  if(!pred||!result) return {occurred:0,winner:0};
+  if(pred.home===''||pred.away===''||result.home===''||result.away==='') return {occurred:0,winner:0};
+  const rH=parseInt(result.home),rA=parseInt(result.away);
+  const pH=parseInt(pred.home),pA=parseInt(pred.away);
+  if([rH,rA,pH,pA].some(isNaN)) return {occurred:0,winner:0};
+  if(rH!==rA) return {occurred:0,winner:0}; // الماتش الحقيقي ملوش جزاء (مفيش تعادل)
+  if(!result.pen) return {occurred:0,winner:0}; // لسه الحكم مادخلش نتيجة الجزاء
+  if(pH!==pA) return {occurred:0,winner:0}; // اللاعب توقع نتيجة غير تعادل
+  const occurred=1;
+  const winner=(pred.pen && pred.pen===result.pen) ? 1 : 0;
+  return {occurred,winner};
+}
+
+// إجمالي نقط الماتش الواحد (للعرض): أجوال + توقع صحيح + (جزاء لو دور خروج مغلوب) - كله مضاعف لو كابتن
+function calcMatchTotalPts(pred,result,isCap,isKO){
+  if(!result||!pred||pred.home===''||pred.away==='') return null;
+  const outcomePts=calcPts(pred,result,isCap)||0;
+  const goalPts=calcGoalPoints(pred,result,isCap)||0;
+  let penPts=0;
+  if(isKO){
+    const {occurred,winner}=calcPenaltyComponents(pred,result);
+    penPts=occurred+winner;
+    if(isCap) penPts*=2;
+  }
+  return {total:outcomePts+goalPts+penPts, outcomePts, goalPts, penPts};
+}
+
 function calcTotal(player){
   const ROUNDS=getRounds();
   const bonusSettings=(dbCache.settings||{}).bonus||{};
-  let total=0,exact=0,correct=0;
+  let total=0,exact=0,correct=0,penBonusCount=0;
   ROUNDS.forEach(r=>{
     const preds=getPreds(player,r.id);
     const cap=getCap(player,r.id);
     let roundExact=0, roundCorrect=0;
+    const isKO=isKnockoutRound(r.id);
     r.matches.forEach(m=>{
       const pred=preds[m.id];
       const result=getResult(m.id);
       if(!pred||!result) return;
+      const isCap=cap===m.id;
+      // عدادات الدقة (بدون كابتن) لاستخدامها في حساب البونص
       const raw=calcPts(pred,result,false);
       if(raw===2){exact++;roundExact++;}
       if(raw>=1){correct++;roundCorrect++;}
-      const pts=calcPts(pred,result,cap===m.id);
-      if(pts) total+=pts;
+      // النقط الفعلية (مع كل المكونات ومضاعفة الكابتن)
+      const outcomePts=calcPts(pred,result,isCap)||0;
+      const goalPts=calcGoalPoints(pred,result,isCap)||0;
+      total+=outcomePts+goalPts;
+      if(isKO){
+        const {occurred,winner}=calcPenaltyComponents(pred,result);
+        let penPts=occurred+winner;
+        if(isCap) penPts*=2;
+        if(penPts){ total+=penPts; penBonusCount+=occurred+winner; }
+      }
     });
     // Bonus for group stages: fixed 5 exact = +2
     if(['g1','g2','g3'].includes(r.id)&&roundExact>=5) total+=2;
@@ -773,7 +872,7 @@ function calcTotal(player){
   if(jWin&&pre.winner===jWin) total+=5;
   const jSF=(dbCache.settings||{}).judge_sf||[];
   if(pre.sf&&jSF.length===4) pre.sf.forEach(t=>{if(jSF.includes(t)) total+=1;});
-  return {total,exact,correct};
+  return {total,exact,correct,penBonusCount};
 }
 
 // ============ FIREBASE ============
@@ -1007,13 +1106,30 @@ function renderMatchForm(){
 
   let h='';
   round.matches.forEach(m=>{
-    const pred=preds[m.id]||{home:'',away:''};
+    const pred=preds[m.id]||{home:'',away:'',pen:''};
     const isCap=cap===m.id;
     const result=getResult(m.id);
-    let pts=null;
-    if(result&&pred.home!==''&&pred.away!=='') pts=calcPts(pred,result,isCap);
+    const isKO=isKnockoutRound(curRound);
+    let mp=null;
+    if(result&&pred.home!==''&&pred.away!=='') mp=calcMatchTotalPts(pred,result,isCap,isKO);
     const dis=isRO?'disabled':'';
     const dt=displayTime(m.date,m.time);
+    const showPen=isKnockoutRound(curRound)&&pred.home!==''&&pred.away!==''&&pred.home===pred.away;
+    const knockoutPenSection = isKnockoutRound(curRound) ? `
+      <div class="pen-picker" id="pen_${m.id}" data-pen="${pred.pen||''}" style="display:${showPen?'flex':'none'};gap:6px;padding:8px 14px;border-top:1px solid rgba(255,255,255,0.05);align-items:center">
+        <span style="font-size:11px;color:var(--muted);white-space:nowrap">⚽ لو تعادل، هياخدها بالجزاء:</span>
+        <button type="button" onclick="${isRO?'':`selectPenWinner('${m.id}','home')`}" data-side="home" style="flex:1;padding:6px 4px;border-radius:6px;font-family:'Cairo',sans-serif;font-size:11px;font-weight:700;cursor:${isRO?'default':'pointer'};border:1.5px solid ${pred.pen==='home'?'var(--gold)':'var(--border)'};background:${pred.pen==='home'?'rgba(245,166,35,0.15)':'var(--card2)'};color:${pred.pen==='home'?'var(--gold)':'var(--muted)'}">${m.home}</button>
+        <button type="button" onclick="${isRO?'':`selectPenWinner('${m.id}','away')`}" data-side="away" style="flex:1;padding:6px 4px;border-radius:6px;font-family:'Cairo',sans-serif;font-size:11px;font-weight:700;cursor:${isRO?'default':'pointer'};border:1.5px solid ${pred.pen==='away'?'var(--gold)':'var(--border)'};background:${pred.pen==='away'?'rgba(245,166,35,0.15)':'var(--card2)'};color:${pred.pen==='away'?'var(--gold)':'var(--muted)'}">${m.away}</button>
+      </div>` : '';
+    const oninputAttr = isKnockoutRound(curRound) ? `oninput="checkPenaltyDisplay('${m.id}')"` : '';
+    let ptsBreakdown='';
+    if(mp){
+      const parts=[];
+      if(mp.goalPts) parts.push(`${mp.goalPts} أجوال`);
+      if(mp.outcomePts) parts.push(`${mp.outcomePts} توقع`);
+      if(mp.penPts) parts.push(`${mp.penPts} جزاء`);
+      ptsBreakdown=`<span class="pts ${mp.total>=2?'pts2':mp.total>=1?'pts1':'pts0'}">${mp.total} نقطة${parts.length?' ('+parts.join(' + ')+')':''}</span>`;
+    }
     h+=`<div class="card" style="margin-bottom:10px">
       <div class="card-hdr">
         <span>ماتش ${m.id.replace('m','')} · ${dt.date} ${dt.time}${m.grp?' · مجموعة '+m.grp:''}</span>
@@ -1023,13 +1139,16 @@ function renderMatchForm(){
       </div>
       <div class="match-body">
         <div class="team-lbl">${m.home}</div>
-        <input class="s-input" type="number" min="0" max="30" inputmode="numeric" value="${pred.home}" id="h_${m.id}" ${dis}>
+        <input class="s-input" type="number" min="0" max="30" inputmode="numeric" value="${pred.home}" id="h_${m.id}" ${dis} ${oninputAttr}>
         <span class="s-sep">:</span>
-        <input class="s-input" type="number" min="0" max="30" inputmode="numeric" value="${pred.away}" id="a_${m.id}" ${dis}>
+        <input class="s-input" type="number" min="0" max="30" inputmode="numeric" value="${pred.away}" id="a_${m.id}" ${dis} ${oninputAttr}>
         <div class="team-lbl away">${m.away}</div>
       </div>
-      ${result?`<div style="padding:4px 14px 10px;font-size:12px;color:var(--muted);display:flex;justify-content:space-between;align-items:center">
-        <span>النتيجة: ${result.home} - ${result.away}</span>${pts!==null?`<span class="pts ${pts>=2?'pts2':pts>=1?'pts1':'pts0'}">${pts} نقطة</span>`:''}</div>`:''}
+      ${knockoutPenSection}
+      ${result?`<div style="padding:4px 14px 10px;font-size:12px;color:var(--muted);display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:4px">
+        <span>النتيجة: ${result.home} - ${result.away}${result.pen?' (جزاء: '+(result.pen==='home'?m.home:m.away)+')':''}</span>
+        <span style="display:flex;gap:4px">${ptsBreakdown}</span>
+        </div>`:''}
     </div>`;
   });
   document.getElementById('pred-matches').innerHTML=h;
@@ -1052,6 +1171,36 @@ function toggleCap(mid){
   fbSet(`caps/${curPlayer}/${curRound}`,c===mid?null:mid);
 }
 
+function checkPenaltyDisplay(mid){
+  const h=document.getElementById('h_'+mid);
+  const a=document.getElementById('a_'+mid);
+  const penDiv=document.getElementById('pen_'+mid);
+  if(!h||!a||!penDiv) return;
+  if(h.value!==''&&a.value!==''&&h.value===a.value){
+    penDiv.style.display='flex';
+  } else {
+    penDiv.style.display='none';
+    penDiv.dataset.pen='';
+    penDiv.querySelectorAll('button').forEach(btn=>{
+      btn.style.border='1.5px solid var(--border)';
+      btn.style.background='var(--card2)';
+      btn.style.color='var(--muted)';
+    });
+  }
+}
+
+function selectPenWinner(mid, side){
+  const penDiv=document.getElementById('pen_'+mid);
+  if(!penDiv) return;
+  penDiv.dataset.pen=side;
+  penDiv.querySelectorAll('button').forEach(btn=>{
+    const isSel=btn.dataset.side===side;
+    btn.style.border='1.5px solid '+(isSel?'var(--gold)':'var(--border)');
+    btn.style.background=isSel?'rgba(245,166,35,0.15)':'var(--card2)';
+    btn.style.color=isSel?'var(--gold)':'var(--muted)';
+  });
+}
+
 async function saveAllPreds(){
   if(isPredReadOnly(curRound)) return;
   const ROUNDS=getRounds();
@@ -1060,7 +1209,15 @@ async function saveAllPreds(){
   round.matches.forEach(m=>{
     const h=document.getElementById('h_'+m.id);
     const a=document.getElementById('a_'+m.id);
-    if(h&&a&&h.value!==''&&a.value!=='') preds[m.id]={home:h.value,away:a.value};
+    if(h&&a&&h.value!==''&&a.value!==''){
+      const entry={home:h.value,away:a.value};
+      if(isKnockoutRound(curRound)&&h.value===a.value){
+        const penDiv=document.getElementById('pen_'+m.id);
+        const penVal=penDiv?penDiv.dataset.pen:'';
+        if(penVal==='home'||penVal==='away') entry.pen=penVal;
+      }
+      preds[m.id]=entry;
+    }
   });
   if(!Object.keys(preds).length){toast('ادخل توقع واحد على الأقل!','var(--red)');return;}
   await fbSet(`predictions/${curPlayer}/${curRound}`,preds);
@@ -1243,16 +1400,26 @@ function renderView(){
     const result=getResult(m.id);
     const isCap=cap===m.id;
     if(!pred||(pred.home===''&&pred.away==='')) return;
-    let pts=null;
-    if(result) pts=calcPts(pred,result,isCap);
+    const isKO=isKnockoutRound(viewRound);
+    let mp=null;
+    if(result) mp=calcMatchTotalPts(pred,result,isCap,isKO);
+    const predPenLabel = (isKnockoutRound(viewRound)&&pred.pen) ? ` (جزاء: ${pred.pen==='home'?m.home:m.away})` : '';
+    let ptsBadge='';
+    if(mp){
+      const parts=[];
+      if(mp.goalPts) parts.push(`${mp.goalPts} أجوال`);
+      if(mp.outcomePts) parts.push(`${mp.outcomePts} توقع`);
+      if(mp.penPts) parts.push(`${mp.penPts} جزاء`);
+      ptsBadge=`<span class="pts ${mp.total>=2?'pts2':mp.total>=1?'pts1':'pts0'}">${mp.total} نقطة${parts.length?' ('+parts.join(' + ')+')':''}</span>`;
+    }
     h+=`<div class="card" style="margin-bottom:10px">
       <div class="card-hdr">
         <span>${m.home} ضد ${m.away}${m.grp?' · مجموعة '+m.grp:''}</span>
-        <span>${result?'✓ '+result.home+'-'+result.away:'⏳'}</span>
+        <span>${result?'✓ '+result.home+'-'+result.away+(result.pen?' (جزاء: '+(result.pen==='home'?m.home:m.away)+')':''):'⏳'}</span>
       </div>
       <div class="pred-row">
-        <span style="flex:1;font-weight:700;font-size:15px;text-align:center">${pred.home} - ${pred.away}${isCap?' ⭐':''}</span>
-        ${pts!==null?`<span class="pts ${pts>=2?'pts2':pts>=1?'pts1':'pts0'}">${pts} نقطة</span>`:''}
+        <span style="flex:1;font-weight:700;font-size:15px;text-align:center">${pred.home} - ${pred.away}${isCap?' ⭐':''}${predPenLabel?`<br><span style="font-size:11px;font-weight:400;color:var(--muted)">${predPenLabel}</span>`:''}</span>
+        <span style="display:flex;gap:4px">${ptsBadge}</span>
       </div>
     </div>`;
   });
@@ -1327,27 +1494,73 @@ function renderJudgeMatches(){
   const ROUNDS=getRounds();
   const round=ROUNDS.find(r=>r.id===judgeRound);
   const results=dbCache.results||{};
+  const isKO=isKnockoutRound(judgeRound);
   let h='';
   round.matches.forEach(m=>{
-    const res=results[m.id]||{home:'',away:''};
+    const res=results[m.id]||{home:'',away:'',pen:''};
+    const showPen=isKO&&res.home!==''&&res.away!==''&&res.home===res.away;
+    const penSection=isKO?`
+      <div class="pen-picker" id="jpen_${m.id}" data-pen="${res.pen||''}" style="display:${showPen?'flex':'none'};gap:6px;padding:8px 12px;border-top:1px solid rgba(255,255,255,0.05);align-items:center">
+        <span style="font-size:11px;color:var(--muted);white-space:nowrap">⚽ مين كسب بالجزاء؟</span>
+        <button type="button" onclick="selectJudgePenWinner('${m.id}','home')" data-side="home" style="flex:1;padding:7px 4px;border-radius:6px;font-family:'Cairo',sans-serif;font-size:11px;font-weight:700;cursor:pointer;border:1.5px solid ${res.pen==='home'?'var(--gold)':'var(--border)'};background:${res.pen==='home'?'rgba(245,166,35,0.15)':'var(--card2)'};color:${res.pen==='home'?'var(--gold)':'var(--muted)'}">${m.home}</button>
+        <button type="button" onclick="selectJudgePenWinner('${m.id}','away')" data-side="away" style="flex:1;padding:7px 4px;border-radius:6px;font-family:'Cairo',sans-serif;font-size:11px;font-weight:700;cursor:pointer;border:1.5px solid ${res.pen==='away'?'var(--gold)':'var(--border)'};background:${res.pen==='away'?'rgba(245,166,35,0.15)':'var(--card2)'};color:${res.pen==='away'?'var(--gold)':'var(--muted)'}">${m.away}</button>
+      </div>`:'';
+    const oninputAttr=isKO?`oninput="checkJudgePenaltyDisplay('${m.id}')"`:'';
     h+=`<div class="card" style="margin-bottom:10px">
       <div class="card-hdr"><span>${m.home} ضد ${m.away}</span><span>${m.date} ${m.time}</span></div>
       <div style="padding:10px 12px;display:flex;align-items:center;gap:8px;flex-wrap:wrap">
-        <input class="j-input" type="number" min="0" max="30" inputmode="numeric" value="${res.home}" id="jh_${m.id}" placeholder="0">
+        <input class="j-input" type="number" min="0" max="30" inputmode="numeric" value="${res.home}" id="jh_${m.id}" placeholder="0" ${oninputAttr}>
         <span class="s-sep">-</span>
-        <input class="j-input" type="number" min="0" max="30" inputmode="numeric" value="${res.away}" id="ja_${m.id}" placeholder="0">
+        <input class="j-input" type="number" min="0" max="30" inputmode="numeric" value="${res.away}" id="ja_${m.id}" placeholder="0" ${oninputAttr}>
         <button class="save-btn" onclick="saveResult('${m.id}')" style="min-height:44px;touch-action:manipulation">حفظ النتيجة ✓</button>
       </div>
+      ${penSection}
     </div>`;
   });
   document.getElementById('judge-matches').innerHTML=h;
+}
+
+function checkJudgePenaltyDisplay(mid){
+  const h=document.getElementById('jh_'+mid);
+  const a=document.getElementById('ja_'+mid);
+  const penDiv=document.getElementById('jpen_'+mid);
+  if(!h||!a||!penDiv) return;
+  if(h.value!==''&&a.value!==''&&h.value===a.value){
+    penDiv.style.display='flex';
+  } else {
+    penDiv.style.display='none';
+    penDiv.dataset.pen='';
+  }
+}
+
+function selectJudgePenWinner(mid, side){
+  const penDiv=document.getElementById('jpen_'+mid);
+  if(!penDiv) return;
+  penDiv.dataset.pen=side;
+  penDiv.querySelectorAll('button').forEach(btn=>{
+    const isSel=btn.dataset.side===side;
+    btn.style.border='1.5px solid '+(isSel?'var(--gold)':'var(--border)');
+    btn.style.background=isSel?'rgba(245,166,35,0.15)':'var(--card2)';
+    btn.style.color=isSel?'var(--gold)':'var(--muted)';
+  });
 }
 
 function saveResult(mid){
   const h=document.getElementById('jh_'+mid).value;
   const a=document.getElementById('ja_'+mid).value;
   if(h===''||a===''){toast('ادخل النتيجة كاملة','var(--red)');return;}
-  fbSet(`results/${mid}`,{home:h,away:a});
+  const result={home:h,away:a};
+  if(h===a){
+    const penDiv=document.getElementById('jpen_'+mid);
+    const penVal=penDiv?penDiv.dataset.pen:'';
+    if(penVal==='home'||penVal==='away'){
+      result.pen=penVal;
+    } else if(isKnockoutRound(judgeRound)){
+      toast('⚠️ الماتش تعادل - حدد مين كسب بالجزاء','var(--red)');
+      return;
+    }
+  }
+  fbSet(`results/${mid}`,result);
   toast('✓ تم حفظ النتيجة');
 }
 
