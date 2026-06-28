@@ -820,7 +820,8 @@ function calcPenaltyComponents(pred,result){
 function calcMatchTotalPts(pred,result,isCap,isKO){
   if(!result||!pred||pred.home===''||pred.away==='') return null;
   const outcomePts=calcPts(pred,result,isCap)||0;
-  const goalPts=calcGoalPoints(pred,result,isCap)||0;
+  // نقط الأجوال بتتطبق على أدوار خروج المغلوب فقط (دور 32 للنهائي)
+  const goalPts=isKO ? (calcGoalPoints(pred,result,isCap)||0) : 0;
   let penPts=0;
   if(isKO){
     const {occurred,winner}=calcPenaltyComponents(pred,result);
@@ -850,7 +851,8 @@ function calcTotal(player){
       if(raw>=1){correct++;roundCorrect++;}
       // النقط الفعلية (مع كل المكونات ومضاعفة الكابتن)
       const outcomePts=calcPts(pred,result,isCap)||0;
-      const goalPts=calcGoalPoints(pred,result,isCap)||0;
+      // نقط الأجوال بتتطبق على أدوار خروج المغلوب فقط (دور 32 للنهائي)
+      const goalPts=isKO ? (calcGoalPoints(pred,result,isCap)||0) : 0;
       total+=outcomePts+goalPts;
       if(isKO){
         const {occurred,winner}=calcPenaltyComponents(pred,result);
