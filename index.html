@@ -286,6 +286,21 @@ select:focus{outline:none;border-color:var(--gold);}
         </div>
       </div>
 
+      <!-- تعديل يدوي للمواجهات -->
+      <div style="border-top:1px solid var(--border);margin-top:18px;padding-top:14px">
+        <div style="font-size:15px;font-weight:700;color:var(--gold);margin-bottom:6px">✏️ تعديل يدوي للمواجهات</div>
+        <p style="font-size:12px;color:var(--muted);margin-bottom:12px">لو في غلط في حساب مواجهات دور الـ32 أو أي دور بعده، اختار الماتش واكتب اسم الفريق الصحيح بنفسك</p>
+        <select id="override-round-sel" onchange="renderOverrideMatchSel()" style="margin-bottom:8px">
+          <option value="r32">دور الـ 32</option>
+          <option value="r16">دور الـ 16</option>
+          <option value="qf">ربع النهائي</option>
+          <option value="sf">نصف النهائي</option>
+          <option value="fin">النهائي والثالث</option>
+        </select>
+        <select id="override-match-sel" onchange="renderOverrideForm()" style="margin-bottom:10px"></select>
+        <div id="override-form"></div>
+      </div>
+
       <!-- بونص الجولات -->
       <div style="border-top:1px solid var(--border);margin-top:18px;padding-top:14px">
         <div style="font-size:15px;font-weight:700;color:var(--gold);margin-bottom:6px">🎁 بونص الجولات</div>
@@ -655,12 +670,19 @@ function getThirdPlaceAssignment(){
 }
 
 function getRounds(){
+  const overrides=dbCache.manual_overrides||{};
   return ROUNDS_BASE.map(r=>({
     ...r,
     matches: r.matches.map(m=>{
+      const ov=overrides[m.id];
       if(m._home!==undefined){
-        return {...m, home:resolveTeam(m._home), away:resolveTeam(m._away)};
+        return {
+          ...m,
+          home: (ov&&ov.home) ? ov.home : resolveTeam(m._home),
+          away: (ov&&ov.away) ? ov.away : resolveTeam(m._away)
+        };
       }
+      // even non-bracket matches (group stage) could theoretically be overridden, but not needed
       return m;
     })
   }));
@@ -1268,6 +1290,7 @@ function renderJudgeMain(){
   renderJudgeLocks();
   renderGroupsSummary();
   renderThirdQualifiersUI();
+  renderOverrideMatchSel();
   renderBonusSettings();
   renderJudgePreSection();
   renderJudgeScoreTable();
@@ -1479,6 +1502,62 @@ function renderThirdAssignmentResult(){
   h+='</div>';
   el.innerHTML=h;
 }
+
+// ============ MANUAL MATCH OVERRIDE ============
+function renderOverrideMatchSel(){
+  const rid=document.getElementById('override-round-sel').value;
+  const round=getRounds().find(r=>r.id===rid);
+  const sel=document.getElementById('override-match-sel');
+  if(!round){sel.innerHTML='';return;}
+  sel.innerHTML=round.matches.map(m=>
+    `<option value="${m.id}">${m.id.replace('m','م')} · ${m.home} ضد ${m.away}</option>`
+  ).join('');
+  renderOverrideForm();
+}
+
+function renderOverrideForm(){
+  const rid=document.getElementById('override-round-sel').value;
+  const mid=document.getElementById('override-match-sel').value;
+  const round=getRounds().find(r=>r.id===rid);
+  const match=round?.matches.find(m=>m.id===mid);
+  const el=document.getElementById('override-form');
+  if(!match){el.innerHTML='';return;}
+  const overrides=dbCache.manual_overrides||{};
+  const ov=overrides[mid]||{};
+  el.innerHTML=`
+    <div style="background:var(--card2);border-radius:10px;padding:12px">
+      <div style="display:flex;gap:8px;margin-bottom:8px;align-items:center">
+        <input type="text" id="ov-home" placeholder="الفريق الأول" value="${ov.home||''}" style="flex:1;padding:10px;background:var(--card);border:1.5px solid var(--border);border-radius:8px;color:var(--text);font-family:'Cairo',sans-serif;font-size:13px;text-align:center">
+        <span style="color:var(--muted);font-size:12px">ضد</span>
+        <input type="text" id="ov-away" placeholder="الفريق الثاني" value="${ov.away||''}" style="flex:1;padding:10px;background:var(--card);border:1.5px solid var(--border);border-radius:8px;color:var(--text);font-family:'Cairo',sans-serif;font-size:13px;text-align:center">
+      </div>
+      <div style="font-size:11px;color:var(--muted);margin-bottom:10px">القيمة المحسوبة أوتوماتيك: ${match.home} ضد ${match.away}${ov.home||ov.away?' (متعدّل حالياً)':''}</div>
+      <div style="display:flex;gap:8px">
+        <button onclick="saveOverride('${mid}')" style="flex:2;padding:10px;background:rgba(245,166,35,0.15);border:1px solid var(--gold);border-radius:8px;color:var(--gold);font-family:'Cairo',sans-serif;font-weight:700;cursor:pointer;font-size:13px;min-height:40px;touch-action:manipulation">حفظ التعديل ✓</button>
+        ${(ov.home||ov.away)?`<button onclick="clearOverride('${mid}')" style="flex:1;padding:10px;background:rgba(231,76,60,0.15);border:1px solid var(--red);border-radius:8px;color:var(--red);font-family:'Cairo',sans-serif;font-weight:700;cursor:pointer;font-size:13px;min-height:40px;touch-action:manipulation">إلغاء التعديل</button>`:''}
+      </div>
+    </div>`;
+}
+
+async function saveOverride(mid){
+  const home=document.getElementById('ov-home').value.trim();
+  const away=document.getElementById('ov-away').value.trim();
+  if(!home&&!away){toast('اكتب اسم فريق واحد على الأقل','var(--red)');return;}
+  const overrides=dbCache.manual_overrides||{};
+  overrides[mid]={home:home||null,away:away||null};
+  await fbSet('manual_overrides',overrides);
+  toast('✓ تم حفظ التعديل اليدوي');
+  renderOverrideMatchSel();
+}
+
+async function clearOverride(mid){
+  const overrides={...(dbCache.manual_overrides||{})};
+  delete overrides[mid];
+  await fbSet('manual_overrides',overrides);
+  toast('✓ تم إلغاء التعديل - رجعنا للحساب الأوتوماتيك');
+  renderOverrideMatchSel();
+}
+
 
 function renderJudgeLocks(){
   let h='';
