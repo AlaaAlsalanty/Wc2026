@@ -863,10 +863,10 @@ function calcTotal(player){
     });
     // Bonus for group stages: fixed 5 exact = +2
     if(['g1','g2','g3'].includes(r.id)&&roundExact>=5) total+=2;
-    // Bonus for knockout rounds: configurable threshold
+    // Bonus for knockout rounds: configurable threshold - based on EXACT predictions (بالملي)
     if(BONUS_ROUNDS.includes(r.id)){
       const threshold = bonusSettings[r.id]!==undefined ? bonusSettings[r.id] : null;
-      if(threshold!==null && roundCorrect>=threshold) total+=2;
+      if(threshold!==null && roundExact>=threshold) total+=2;
     }
   });
   const pre=(dbCache.pre||{})[player]||{};
@@ -1916,7 +1916,7 @@ function renderBonusSettings(){
     h+=`<div style="display:flex;align-items:center;gap:10px;padding:10px 0;border-bottom:1px solid rgba(255,255,255,0.06)">
       <span style="flex:1;font-size:13px">${BONUS_NAMES[rid]}</span>
       <div style="display:flex;align-items:center;gap:8px">
-        <span style="font-size:12px;color:var(--muted)">توقعات صح =</span>
+        <span style="font-size:12px;color:var(--muted)">توقعات مظبوطة بالملي =</span>
         <input type="number" min="1" max="16" value="${val}" id="bonus_${rid}"
           style="width:52px;height:40px;background:var(--card2);border:1.5px solid var(--border);border-radius:8px;color:var(--text);font-size:16px;font-weight:700;font-family:'Cairo',sans-serif;text-align:center;inputmode:numeric"
           onchange="previewBonus('${rid}',this.value)">
